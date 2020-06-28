@@ -37,6 +37,14 @@
 #include <unistd.h>  /* getopt */
 #endif
 
+#ifdef ANDROID
+int log_tx_rx  = 0;
+uint64_t tx    = 0;
+uint64_t rx    = 0;
+uint64_t last  = 0;
+char *prefix = NULL;
+#endif
+
 static void usage(void);
 
 struct ssr_client_state *g_state = NULL;
@@ -44,6 +52,13 @@ void feedback_state(struct ssr_client_state *state, void *p);
 void state_set_force_quit(struct ssr_client_state *state, bool force_quit);
 void print_remote_info(const struct server_config *config);
 static bool verify_config(struct server_config *config);
+
+#if defined(__unix__) || defined(__linux__)
+#include <signal.h>
+void sighandler(int sig) {
+    pr_err("signal %d", sig);
+}
+#endif // defined(__unix__) || defined(__linux__)
 
 void fn_onexit(void) {
     MEM_CHECK_DUMP_LEAKS();
@@ -54,6 +69,11 @@ struct cmd_line_info *cmds = NULL;
 int main(int argc, char **argv) {
     struct server_config *config = NULL;
     int err = -1;
+
+    #if defined(__unix__) || defined(__linux__)
+    struct sigaction sa = { {&sighandler}, {{0}}, 0, NULL };
+    sigaction(SIGPIPE, &sa, NULL);
+    #endif // defined(__unix__) || defined(__linux__)
 
     MEM_CHECK_BEGIN();
     MEM_CHECK_BREAK_ALLOC(63);
@@ -97,6 +117,11 @@ int main(int argc, char **argv) {
             sprintf(param, "-c \"%s\"", cmds->cfg_file);
             daemon_wrapper(argv[0], param);
         }
+
+#ifdef ANDROID
+        log_tx_rx  = cmds->log_tx_rx;
+        prefix = cmds->prefix;
+#endif
 
         print_remote_info(config);
 

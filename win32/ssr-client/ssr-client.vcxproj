@@ -62,6 +62,7 @@
     <ClInclude Include="..\..\src\client\defs.h" />
     <ClInclude Include="..\..\src\client\s5.h" />
     <ClInclude Include="..\..\src\client\tls_cli.h" />
+    <ClInclude Include="..\..\src\ref_count_def.h" />
     <ClInclude Include="..\..\src\text_in_color.h" />
     <ClInclude Include="..\..\src\tunnel.h" />
     <ClInclude Include="..\..\src\cmd_line_parser.h" />
@@ -99,7 +100,6 @@
     <ProjectGuid>{F97AD980-48B0-4C94-9662-499EFEE4AB44}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>ssrlocal</RootNamespace>
-    <WindowsTargetPlatformVersion>5.2</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">

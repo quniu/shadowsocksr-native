@@ -131,7 +131,7 @@ function dependency_install() {
         ${INS} install cron vim curl -y
         ${INS} update -y
         ${INS} install cmake make zlib1g zlib1g-dev build-essential autoconf libtool openssl libssl-dev -y
-        if [[ "${ID}" == "ubuntu" && ${VERSION_ID} -ge 20 ]]; then
+        if [[ "${ID}" == "ubuntu" && `echo "${VERSION_ID}" | cut -d '.' -f1` -ge 20 ]]; then
             ${INS} install python3 python python2-minimal inetutils-ping -y
         else
             ${INS} install python3 python python-minimal -y
@@ -351,7 +351,7 @@ function nginx_web_server_config_end() {
         }
         
         location / {
-            rewrite ^/(.*)$ https://${web_svr_domain}/$1 permanent;
+            rewrite ^/(.*)$ https://${web_svr_domain}:${web_svr_listen_port}/$1 permanent;
         }
     }
 
@@ -409,6 +409,7 @@ function main() {
     dependency_install
     web_svr_reverse_proxy_port=`random_listen_port`
     domain_check
+    echo "请输入 站点端口号 (默认值 443) "
     web_svr_listen_port=`input_web_listen_port`
     nginx_install
     nginx_web_server_config_begin
