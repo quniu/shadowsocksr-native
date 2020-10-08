@@ -128,7 +128,7 @@ static void tunnel_timeout_expire_done(struct tunnel_ctx* tunnel, struct socket_
 static void tunnel_outgoing_connected_done(struct tunnel_ctx* tunnel, struct socket_ctx* socket);
 static void tunnel_read_done(struct tunnel_ctx* tunnel, struct socket_ctx* socket);
 static void tunnel_arrive_end_of_file(struct tunnel_ctx* tunnel, struct socket_ctx* socket);
-static void tunnel_on_getaddrinfo_done(struct tunnel_ctx* tunnel, struct socket_ctx* socket);
+static void tunnel_on_getaddrinfo_done(struct tunnel_ctx* tunnel, struct socket_ctx* socket, const struct addrinfo* ai);
 static void tunnel_write_done(struct tunnel_ctx* tunnel, struct socket_ctx* socket);
 static size_t tunnel_get_alloc_size(struct tunnel_ctx* tunnel, struct socket_ctx* socket, size_t suggested_size);
 static bool tunnel_ssr_is_in_streaming(struct tunnel_ctx* tunnel);
@@ -204,10 +204,10 @@ struct tunnel_ctx* client_tunnel_initialize(uv_tcp_t* lx, unsigned int idle_time
 
 static void client_tunnel_connecting_print_info(struct tunnel_ctx* tunnel) {
     struct client_ctx* ctx = (struct client_ctx*)tunnel->data;
-    char* tmp = socks5_address_to_string(tunnel->desired_addr, &malloc);
+    char* tmp = socks5_address_to_string(tunnel->desired_addr, &malloc, true);
     const char* udp = ctx->udp_data_ctx ? "[UDP]" : "";
 #if defined(__PRINT_INFO__)
-    pr_info("++++ connecting %s \"%s:%d\" ... ++++", udp, tmp, (int)tunnel->desired_addr->port);
+    pr_info("++++ connecting %s \"%s\" ... ++++", udp, tmp);
 #endif
     free(tmp);
     (void)udp;
@@ -215,18 +215,18 @@ static void client_tunnel_connecting_print_info(struct tunnel_ctx* tunnel) {
 
 static void client_tunnel_shutdown_print_info(struct tunnel_ctx* tunnel, bool success) {
     struct client_ctx* ctx = (struct client_ctx*)tunnel->data;
-    char* tmp = socks5_address_to_string(tunnel->desired_addr, &malloc);
+    char* tmp = socks5_address_to_string(tunnel->desired_addr, &malloc, true);
     const char* udp = (ctx->stage == tunnel_stage_s5_udp_accoc || ctx->udp_data_ctx) ? "[UDP]" : "";
     if (!success) {
 #if defined(__PRINT_INFO__)
-        pr_err("---- disconnected %s \"%s:%d\" with failed. ---", udp, tmp, (int)tunnel->desired_addr->port);
+        pr_err("---- disconnected %s \"%s\" with failed. ---", udp, tmp);
 #endif
     } else {
         if (udp && tunnel->desired_addr->port == 0) {
             // It's UDP ASSOCIATE requests, don't inform the closing status.
         } else {
 #if defined(__PRINT_INFO__)
-            pr_info("---- disconnected %s \"%s:%d\" ----", udp, tmp, (int)tunnel->desired_addr->port);
+            pr_info("---- disconnected %s \"%s\" ----", udp, tmp);
 #endif
         }
     }
@@ -1016,7 +1016,7 @@ void client_ctx_destroy_internal(struct client_ctx* ctx) {
     buffer_release(ctx->init_pkg);
     buffer_release(ctx->first_client_pkg);
     s5_ctx_release(ctx->parser);
-    if (ctx->sec_websocket_key) { free(ctx->sec_websocket_key); }
+    object_safe_free((void**)&ctx->sec_websocket_key);
     buffer_release(ctx->server_delivery_cache);
     buffer_release(ctx->local_write_cache);
     udp_data_context_destroy(ctx->udp_data_ctx);
@@ -1045,8 +1045,9 @@ static void tunnel_arrive_end_of_file(struct tunnel_ctx* tunnel, struct socket_c
     tunnel->tunnel_shutdown(tunnel);
 }
 
-static void tunnel_on_getaddrinfo_done(struct tunnel_ctx* tunnel, struct socket_ctx* socket) {
+static void tunnel_on_getaddrinfo_done(struct tunnel_ctx* tunnel, struct socket_ctx* socket, const struct addrinfo* ai) {
     tunnel->tunnel_dispatcher(tunnel, socket);
+    (void)ai;
 }
 
 static void tunnel_write_done(struct tunnel_ctx* tunnel, struct socket_ctx* socket) {
@@ -1160,9 +1161,8 @@ static void tls_cli_on_connection_established(struct tls_cli_ctx* tls_cli, int s
     ctx->connection_status = status;
 
     if (status < 0) {
-        int port = (int)tunnel->desired_addr->port;
-        char* tmp = socks5_address_to_string(tunnel->desired_addr, &malloc);
-        pr_err("[TLS] connecting \"%s:%d\" failed: %d: %s", tmp, port, status, uv_strerror(status));
+        char* tmp = socks5_address_to_string(tunnel->desired_addr, &malloc, true);
+        pr_err("[TLS] connecting \"%s\" failed: %d: %s", tmp, status, uv_strerror(status));
         free(tmp);
 
         tunnel->tunnel_shutdown(tunnel);
@@ -1198,15 +1198,28 @@ static void tls_cli_on_connection_established(struct tls_cli_ctx* tls_cli, int s
             size_t typ_len = 0;
             const uint8_t* typ = buffer_get_data(tmp, &typ_len);
             char* key = websocket_generate_sec_websocket_key(&malloc);
-            ctx->sec_websocket_key = key;
+            string_safe_assign(&ctx->sec_websocket_key, key);
+            free(key);
 
-            buf = websocket_connect_request(domain, domain_port, url_path, key, &malloc, &len);
+            buf = websocket_connect_request(domain, domain_port, url_path, ctx->sec_websocket_key, &malloc, &len);
+            if (config->target_address)
+            {
+                char* b64addr = url_safe_base64_encode_alloc(typ, (size_t)typ_len, &malloc);
+                static const char* addr_fmt = "Target-Address" ": %s\r\n";
+                char* addr_field = (char*)calloc(strlen(addr_fmt) + strlen(b64addr) + 1, sizeof(*addr_field));
+                sprintf(addr_field, addr_fmt, b64addr);
+                buf = http_header_append_new_field(buf, &len, &realloc, addr_field);
+                free(addr_field);
+                free(b64addr);
+            }
+            else {
             buf = http_header_set_payload_data(buf, &len, &realloc, typ, typ_len);
+            }
             if (ctx->udp_data_ctx) {
                 size_t addr_len = 0;
                 uint8_t* addr_p = socks5_address_binary(&ctx->udp_data_ctx->target_addr, &malloc, &addr_len);
-                char* b64str = url_safe_base64_encode_alloc(addr_p, (int)addr_len, &malloc);
-                static const char* udp_fmt = "UDP: %s\r\n";
+                char* b64str = url_safe_base64_encode_alloc(addr_p, (size_t)addr_len, &malloc);
+                static const char* udp_fmt = "UDP" ": %s\r\n";
                 char* udp_field = (char*)calloc(strlen(udp_fmt) + strlen(b64str) + 1, sizeof(*udp_field));
                 sprintf(udp_field, udp_fmt, b64str);
                 buf = http_header_append_new_field(buf, &len, &realloc, udp_field);
@@ -1228,13 +1241,13 @@ static void tls_cli_on_write_done(struct tls_cli_ctx* tls_cli, int status, void*
     struct tunnel_ctx* tunnel = ctx->tunnel;
     assert(ctx->tls_ctx == tls_cli);
     if (status < 0) {
-        int port = (int)tunnel->desired_addr->port;
-        char* tmp = socks5_address_to_string(tunnel->desired_addr, &malloc);
-        pr_err("[TLS] write \"%s:%d\" failed: %d: %s", tmp, port, status, uv_strerror(status));
+        char* tmp = socks5_address_to_string(tunnel->desired_addr, &malloc, true);
+        pr_err("[TLS] write \"%s\" failed: %d: %s", tmp, status, uv_strerror(status));
         free(tmp);
 
         tunnel->tunnel_shutdown(tunnel);
     }
+    (void)tls_cli;
 }
 
 static void tls_cli_on_data_received(struct tls_cli_ctx* tls_cli, int status, const uint8_t* data, size_t size, void* p) {
@@ -1252,12 +1265,11 @@ static void tls_cli_on_data_received(struct tls_cli_ctx* tls_cli, int status, co
     }
 
     if (status < 0) {
-        int port = (int)tunnel->desired_addr->port;
-        char* tmp = socks5_address_to_string(tunnel->desired_addr, &malloc);
+        char* tmp = socks5_address_to_string(tunnel->desired_addr, &malloc, true);
         if (status == UV_EOF) {
             (void)tmp; // pr_warn("connection with %s:%d closed abnormally.", tmp, port);
         } else {
-            pr_err("[TLS] read on %s:%d error %ld: %s", tmp, port, (long)status, uv_strerror((int)status));
+            pr_err("[TLS] read on %s error %ld: %s", tmp, (long)status, uv_strerror((int)status));
         }
         free(tmp);
 
@@ -1278,6 +1290,7 @@ static void tls_cli_on_data_received(struct tls_cli_ctx* tls_cli, int status, co
             pl != size ||
             0 != strcmp(accept_val, calc_val))
         {
+            PRINT_ERR("[TLS] error with status: %s", http_headers_get_status(hdrs));
             tunnel->tunnel_shutdown(tunnel);
         } else {
             if (ctx->udp_data_ctx) {

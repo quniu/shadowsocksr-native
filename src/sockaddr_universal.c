@@ -60,10 +60,10 @@ bool socks5_address_parse(const uint8_t *data, size_t len, struct socks5_address
     return true;
 }
 
-char * socks5_address_to_string(const struct socks5_address *addr, void*(*allocator)(size_t)) {
+char* socks5_address_to_string(const struct socks5_address* addr, void* (*allocator)(size_t), bool with_port) {
     const char *addr_ptr = NULL;
     char *buffer = NULL;
-    static const size_t size = 0x100 + 1;
+    static const size_t size = 0x100 + 7;
 
     if (addr==NULL || allocator==NULL) {
         return NULL;
@@ -85,10 +85,13 @@ char * socks5_address_to_string(const struct socks5_address *addr, void*(*alloca
         assert(size >= INET_ADDRSTRLEN);
         uv_inet_ntop(AF_INET, &addr->addr.ipv4, buffer, size);
         break;
-    case SOCKS5_ADDRTYPE_IPV6:
-        assert(size >= INET6_ADDRSTRLEN);
-        uv_inet_ntop(AF_INET6, &addr->addr.ipv6, buffer, size);
+    case SOCKS5_ADDRTYPE_IPV6: {
+        char tmp[INET6_ADDRSTRLEN + 1] = { 0 };
+        uv_inet_ntop(AF_INET6, &addr->addr.ipv6, tmp, sizeof(tmp));
+        assert(size >= INET6_ADDRSTRLEN + 3);
+        sprintf(buffer, with_port ? "[%s]" : "%s", tmp);
         break;
+    }
     case SOCKS5_ADDRTYPE_DOMAINNAME:
         addr_ptr = addr->addr.domainname;
         assert(size >= (strlen(addr_ptr) + 1));
@@ -98,6 +101,9 @@ char * socks5_address_to_string(const struct socks5_address *addr, void*(*alloca
         assert(0);
         return NULL;
         break;
+    }
+    if (with_port) {
+        sprintf(buffer + strlen(buffer), ":%d", (int)addr->port);
     }
     return buffer;
 }
@@ -264,21 +270,29 @@ int universal_address_from_string(const char *addr_str, uint16_t port, bool tcp,
         return result;
     }
 
-    // Note, we're taking the first valid address, there may be more than one
-    switch (ai->ai_family) {
-    case AF_INET:
-        addr->addr4 = *(const struct sockaddr_in *) ai->ai_addr;
+    {
+        bool found = false;
+        struct addrinfo* iter;
+        for (iter = ai; iter != NULL; iter = iter->ai_next) {
+            if (iter->ai_family == AF_INET) {
+                addr->addr4 = *(const struct sockaddr_in*)iter->ai_addr;
+                found = true;
+                break;
+            }
+        }
+        if (found == false) {
+            for (iter = ai; iter != NULL; iter = iter->ai_next) {
+                if (iter->ai_family == AF_INET6) {
+                    addr->addr6 = *(const struct sockaddr_in6*)iter->ai_addr;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert(found);
         addr->addr4.sin_port = htons(port);
-        result = 0;
-        break;
-    case AF_INET6:
-        addr->addr6 = *(const struct sockaddr_in6 *) ai->ai_addr;
-        addr->addr6.sin6_port = htons(port);
-        result = 0;
-        break;
-    default:
-        assert(0);
-        break;
+
+        result = found ? 0 : -1;
     }
 
     freeaddrinfo(ai);

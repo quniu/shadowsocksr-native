@@ -32,6 +32,7 @@
 #include "ssr_cipher_names.h"
 #include "daemon_wrapper.h"
 #include "ssrbuffer.h"
+#include "exe_file_path.h"
 
 #if HAVE_UNISTD_H
 #include <unistd.h>  /* getopt */
@@ -97,9 +98,18 @@ int main(int argc, char **argv) {
             string_safe_assign(&cmds->cfg_file, DEFAULT_CONF_PATH);
         }
 
-        config = config_create();
-        if (parse_config_file(false, cmds->cfg_file, config) == false) {
-            break;
+        if ((config = parse_config_file(false, cmds->cfg_file)) == NULL) {
+            char* separ = NULL;
+            char* cfg_file = exe_file_path(&malloc);
+            if (cfg_file && ((separ = strrchr(cfg_file, PATH_SEPARATOR)))) {
+                ++separ;
+                strcpy(separ, CFG_JSON);
+                config = parse_config_file(false, cfg_file);
+            }
+            free(cfg_file);
+            if (config == NULL) {
+                break;
+            }
         }
 
         if (verify_config(config) == false) {
@@ -147,6 +157,7 @@ int main(int argc, char **argv) {
 void print_remote_info(const struct server_config *config) {
     char remote_host[256] = { 0 };
     char password[256] = { 0 };
+    union sockaddr_universal remote_addr = { { 0 } };
 
     strcpy(remote_host, config->remote_host);
     if (strlen(remote_host) > 4) {
@@ -164,8 +175,14 @@ void print_remote_info(const struct server_config *config) {
         }
     }
 
+    universal_address_from_string_no_dns(config->remote_host, config->remote_port, &remote_addr);
+
     pr_info("ShadowsocksR native client\n");
-    pr_info("remote server    %s:%hu", remote_host, config->remote_port);
+    if (remote_addr.addr6.sin6_family == AF_INET6) {
+        pr_info("remote server    [%s]:%hu", remote_host, config->remote_port);
+    } else {
+        pr_info("remote server    %s:%hu", remote_host, config->remote_port);
+    }
     pr_info("method           %s", config->method);
     pr_info("password         %s", password);
     pr_info("protocol         %s", config->protocol);
