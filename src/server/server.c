@@ -232,6 +232,8 @@ static int ssr_server_run_loop(struct server_config *config, bool force_quit) {
     loop = (uv_loop_t *) calloc(1, sizeof(uv_loop_t));
     uv_loop_init(loop);
 
+    config_ssrot_revision(config);
+
     state = (struct ssr_server_state *) calloc(1, sizeof(*state));
     state->force_quit = force_quit;
     state->env = ssr_cipher_env_create(config, state);
@@ -257,7 +259,9 @@ static int ssr_server_run_loop(struct server_config *config, bool force_quit) {
         error = uv_listen((uv_stream_t *)listener, SSR_MAX_CONN, tunnel_incoming_connection_established_cb);
 
         if (error != 0) {
-            PRINT_ERR("Error on listening: %s.\n", uv_strerror(error));
+            char* addr_str = universal_address_to_string(&addr, &malloc, true);
+            PRINT_ERR("Error on listening \"%s\": %s.\n", addr_str, uv_strerror(error));
+            free(addr_str);
             return error;
         }
         state->tcp_listener = listener;
@@ -471,7 +475,14 @@ static void tunnel_dispatcher(struct tunnel_ctx* tunnel, struct socket_ctx* sock
     const char *info = tunnel_stage_string(ctx->stage); (void)info;
     (void)done;
 #if defined(__PRINT_INFO__)
-    pr_info("%s", info);
+    if (tunnel_is_in_streaming(tunnel)) {
+        if (tunnel->in_streaming == false) {
+            tunnel->in_streaming = true;
+            pr_info("%s ...", info);
+        }
+    } else {
+        pr_info("%s", info);
+    }
 #endif
     strncpy(tunnel->extra_info, info, 0x100 - 1);
     switch (ctx->stage) {
@@ -825,47 +836,6 @@ static void do_handle_client_feedback(struct tunnel_ctx *tunnel, struct socket_c
     buffer_release(proto_confirm);
 }
 
-static int validate_hostname(const char *hostname, size_t hostname_len) {
-    static const char valid_label_bytes[] =
-        "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz";
-
-    const char *label;
-    if (hostname == NULL)
-        return 0;
-
-    if (hostname_len < 1 || hostname_len > 255)
-        return 0;
-
-    if (hostname[0] == '.')
-        return 0;
-
-    label = hostname;
-    while (label < hostname + hostname_len) {
-        const char *next_dot;
-        size_t label_len = hostname_len - (label - hostname);
-        next_dot = strchr(label, '.');
-        if (next_dot != NULL) {
-            label_len = next_dot - label;
-        }
-        if (label + label_len > hostname + hostname_len) {
-            return 0;
-        }
-        if (label_len > 63 || label_len < 1) {
-            return 0;
-        }
-        if (label[0] == '-' || label[label_len - 1] == '-') {
-            return 0;
-        }
-        if (strspn(label, valid_label_bytes) < label_len) {
-            return 0;
-        }
-        label += label_len + 1;
-    }
-
-    return 1;
-}
-
-
 static void do_parse(struct tunnel_ctx *tunnel, struct socket_ctx *socket) {
     /*
      * Shadowsocks TCP Relay Header, same as SOCKS5:
@@ -924,12 +894,6 @@ static void do_parse(struct tunnel_ctx *tunnel, struct socket_ctx *socket) {
     }
 
     if (ipFound == false) {
-        if (!validate_hostname(host, strlen(host))) {
-            // report_addr(server->fd, MALFORMED);
-            tunnel->tunnel_shutdown(tunnel);
-            free(host);
-            return;
-        }
         ctx->stage = tunnel_stage_resolve_host;
         socket_ctx_getaddrinfo(outgoing, host, s5addr->port);
     } else {
@@ -991,12 +955,14 @@ static void do_connect_host_start(struct tunnel_ctx *tunnel, struct socket_ctx *
 
     addr = socks5_address_to_string(tunnel->desired_addr, &malloc, true);
     if (err != 0) {
-        pr_err("connect \"%s\" error: %s", addr, uv_strerror(err));
+        u_short sa_family = socket->addr.addr.sa_family;
+        char* sf = (sa_family == AF_INET) ? "IPv4" : ((sa_family == AF_INET6) ? "IPv6" : "unknown");
+        pr_err("connect \"%s\" (%s) error: %s", addr, sf, uv_strerror(err));
 
         {
             char* host = socks5_address_to_string(tunnel->desired_addr, &malloc, false);
             struct ssr_server_state* state = (struct ssr_server_state*)ctx->env->data;
-            if (ip_addr_cache_is_address_exist(state->resolved_ip_cache, host) == false) {
+            if (ip_addr_cache_is_address_exist(state->resolved_ip_cache, host)) {
                 ip_addr_cache_remove_address(state->resolved_ip_cache, host);
             }
             free(host);
@@ -1145,32 +1111,21 @@ static void do_tls_init_package(struct tunnel_ctx *tunnel, struct socket_ctx *so
             }
             string_safe_assign(&ctx->sec_websocket_key, key);
         }
-        if (config->target_address)
         {
             uint8_t* addr_p;
             size_t p_len = 0;
-            struct buffer_t* buf;
             const char* addr_field = http_headers_get_field_val(hdrs, "Target-Address");
             if (addr_field == NULL) {
                 do_normal_response(tunnel);
                 break;
             }
-            addr_p = url_safe_base64_decode_alloc(addr_field, &malloc, &p_len);
+            addr_p = std_base64_decode_alloc(addr_field, &malloc, &p_len);
             if (addr_p == NULL) {
                 do_normal_response(tunnel);
                 break;
             }
-            buf = buffer_create_from(addr_p, p_len);
+            result = buffer_create_from(addr_p, p_len);
             free(addr_p);
-            result = tunnel_cipher_server_decrypt(ctx->cipher, buf, &obfs_receipt, &proto_confirm);
-            buffer_release(buf);
-        }
-        else
-        {
-            size_t cb = http_headers_get_content_beginning(hdrs);
-            struct buffer_t *buf = buffer_create_from(indata + cb, len - cb);
-            result = tunnel_cipher_server_decrypt(ctx->cipher, buf, &obfs_receipt, &proto_confirm);
-            buffer_release(buf);
         }
         ASSERT(obfs_receipt == NULL);
         ASSERT(proto_confirm == NULL);

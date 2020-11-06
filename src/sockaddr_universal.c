@@ -299,26 +299,33 @@ int universal_address_from_string(const char *addr_str, uint16_t port, bool tcp,
     return result;
 }
 
-char * universal_address_to_string(const union sockaddr_universal *addr, void*(*allocator)(size_t)) {
+char* universal_address_to_string(const union sockaddr_universal* addr, void* (*allocator)(size_t), bool with_port)
+{
     char *addr_str;
     if (addr==NULL || allocator==NULL) {
         return NULL;
     }
-    addr_str = (char *) allocator(INET6_ADDRSTRLEN);
+    addr_str = (char *) allocator(INET6_ADDRSTRLEN + 7);
     if (addr_str == NULL) {
         return NULL;
     }
-    memset(addr_str, 0, INET6_ADDRSTRLEN);
+    memset(addr_str, 0, INET6_ADDRSTRLEN + 7);
 
     switch (addr->addr4.sin_family) {
     case AF_INET:
         uv_inet_ntop(AF_INET, &addr->addr4.sin_addr, addr_str, INET6_ADDRSTRLEN);
         break;
-    case AF_INET6:
-        uv_inet_ntop(AF_INET6, &addr->addr6.sin6_addr, addr_str, INET6_ADDRSTRLEN);
+    case AF_INET6: {
+        char v6addr[INET6_ADDRSTRLEN + 1] = { 0 };
+        uv_inet_ntop(AF_INET6, &addr->addr6.sin6_addr, v6addr, sizeof(v6addr));
+        sprintf(addr_str, with_port ? "[%s]" : "%s", v6addr);
         break;
+    }
     default:
         break;
+    }
+    if (with_port && strlen(addr_str)) {
+        sprintf(addr_str + strlen(addr_str), ":%d", (int)ntohs(addr->addr4.sin_port));
     }
     return addr_str;
 }
@@ -328,4 +335,25 @@ uint16_t universal_address_get_port(const union sockaddr_universal *addr) {
         return ntohs(addr->addr4.sin_port);
     }
     return 0;
+}
+
+bool ip_mapping_v4_to_v6(const struct sockaddr_in* addr4, struct sockaddr_in6* addr6)
+{
+    volatile struct sockaddr_in addr4_cache;
+    if (addr4 == NULL || addr6 == NULL || addr4->sin_family != AF_INET) {
+        return false;
+    }
+    memcpy((void*)&addr4_cache, addr4, sizeof(addr4_cache));
+
+    memset(addr6, 0, sizeof(*addr6));
+
+    addr6->sin6_family = AF_INET6;
+    addr6->sin6_port = addr4_cache.sin_port;
+
+    addr6->sin6_addr.s6_addr[10] = 0xff;
+    addr6->sin6_addr.s6_addr[11] = 0xff;
+
+    *((uint32_t*)&(addr6->sin6_addr.s6_addr[12])) = addr4_cache.sin_addr.s_addr;
+
+    return true;
 }

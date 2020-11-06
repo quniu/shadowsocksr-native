@@ -306,7 +306,14 @@ static void tunnel_ssr_dispatcher(struct tunnel_ctx* tunnel, struct socket_ctx* 
     struct socket_ctx* outgoing = tunnel->outgoing;
     const char* info = tunnel_stage_string(ctx->stage); (void)info;
 #if defined(__PRINT_INFO__)
-    pr_info("%s", info);
+    if (tunnel_ssr_is_in_streaming(tunnel)) {
+        if (tunnel->in_streaming == false) {
+            tunnel->in_streaming = true;
+            pr_info("%s ...", info);
+        }
+    } else {
+        pr_info("%s", info);
+    }
 #endif
     strncpy(tunnel->extra_info, info, 0x100 - 1);
     ASSERT(config->over_tls_enable == false);
@@ -390,7 +397,14 @@ static void tunnel_tls_dispatcher(struct tunnel_ctx* tunnel, struct socket_ctx* 
     struct socket_ctx* incoming = tunnel->incoming;
     const char* info = tunnel_stage_string(ctx->stage); (void)info;
 #if defined(__PRINT_INFO__)
-    pr_info("%s", info);
+    if (tunnel_tls_is_in_streaming(tunnel)) {
+        if (tunnel->in_streaming == false) {
+            tunnel->in_streaming = true;
+            pr_info("%s ...", info);
+        }
+    } else {
+        pr_info("%s", info);
+    }
 #endif
     strncpy(tunnel->extra_info, info, 0x100 - 1);
     ASSERT(config->over_tls_enable);
@@ -583,7 +597,7 @@ static void do_parse_s5_request_from_client_app(struct tunnel_ctx* tunnel) {
 
         VERIFY(0 == uv_tcp_getsockname(&incoming->handle.tcp, (struct sockaddr*)&sockname, &namelen));
 
-        addr = universal_address_to_string(&sockname, &malloc);
+        addr = universal_address_to_string(&sockname, &malloc, false);
         port = universal_address_get_port(&sockname);
 
         buf = s5_build_udp_assoc_package(config->udp, addr, port, &malloc, &len);
@@ -1187,9 +1201,7 @@ static void tls_cli_on_connection_established(struct tls_cli_ctx* tls_cli, int s
                 cstl_deque_pop_front(ctx->udp_data_ctx->send_deque);
             }
         }
-        if (ssr_ok != tunnel_cipher_client_encrypt(ctx->cipher, tmp)) {
-            tunnel->tunnel_shutdown(tunnel);
-        } else {
+        {
             const char* url_path = config->over_tls_path;
             const char* domain = config->over_tls_server_domain;
             unsigned short domain_port = config->remote_port;
@@ -1202,18 +1214,14 @@ static void tls_cli_on_connection_established(struct tls_cli_ctx* tls_cli, int s
             free(key);
 
             buf = websocket_connect_request(domain, domain_port, url_path, ctx->sec_websocket_key, &malloc, &len);
-            if (config->target_address)
             {
-                char* b64addr = url_safe_base64_encode_alloc(typ, (size_t)typ_len, &malloc);
+                char* b64addr = std_base64_encode_alloc(typ, (size_t)typ_len, &malloc);
                 static const char* addr_fmt = "Target-Address" ": %s\r\n";
                 char* addr_field = (char*)calloc(strlen(addr_fmt) + strlen(b64addr) + 1, sizeof(*addr_field));
                 sprintf(addr_field, addr_fmt, b64addr);
                 buf = http_header_append_new_field(buf, &len, &realloc, addr_field);
                 free(addr_field);
                 free(b64addr);
-            }
-            else {
-            buf = http_header_set_payload_data(buf, &len, &realloc, typ, typ_len);
             }
             if (ctx->udp_data_ctx) {
                 size_t addr_len = 0;
@@ -1290,7 +1298,9 @@ static void tls_cli_on_data_received(struct tls_cli_ctx* tls_cli, int status, co
             pl != size ||
             0 != strcmp(accept_val, calc_val))
         {
-            PRINT_ERR("[TLS] error with status: %s", http_headers_get_status(hdrs));
+            char* tmp = socks5_address_to_string(tunnel->desired_addr, &malloc, true);
+            pr_err("[TLS] websocket error at \"%s\" with status: %s", tmp, http_headers_get_status(hdrs));
+            free(tmp);
             tunnel->tunnel_shutdown(tunnel);
         } else {
             if (ctx->udp_data_ctx) {
@@ -1344,7 +1354,12 @@ static void tls_cli_on_data_received(struct tls_cli_ctx* tls_cli, int status, co
                 if (info.payload_size >= sizeof(uint16_t)) {
                     reason = (ws_close_reason)ws_ntoh16(*((uint16_t*)payload));
                 }
-                ASSERT(reason == WS_CLOSE_REASON_NORMAL);
+                if (reason != WS_CLOSE_REASON_NORMAL) {
+                    char* target = socks5_address_to_string(tunnel->desired_addr, &malloc, true);
+                    const char* fmt = "[TLS] websocket warning at \"%s\" with close reason %s and info \"%s\"";
+                    pr_warn(fmt, target, ws_close_reason_string(reason), ((char*)payload)+sizeof(uint16_t));
+                    free(target);
+                }
                 free(payload);
                 ctx->tls_is_eof = true;
                 break;
